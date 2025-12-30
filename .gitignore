@@ -5,6 +5,10 @@
 *.xcuserstate
 DerivedData/
 
+# XcodeGen generated files (source of truth is project.yml)
+src/HIAHDesktop/Info.plist
+src/extension/Info.plist
+
 # Nix
 result
 result-*

@@ -355,10 +355,6 @@ static HIAHProcessManager *_sharedManager = nil;
         return;
     }
     
-    // Log sync operation for debugging
-    NSLog(@"[HIAHProcessManager] Syncing with kernel: %lu kernel processes, %lu managed processes", 
-          (unsigned long)kernelProcesses.count, (unsigned long)self.processesByPID.count);
-    
     NSMutableSet *kernelPIDs = [NSMutableSet set];
     NSMutableArray *newProcesses = [NSMutableArray array];
     BOOL hasUpdates = NO;

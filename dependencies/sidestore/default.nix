@@ -19,10 +19,17 @@ let
   
   roxas = pkgs.callPackage ./roxas-spm.nix {};
   altsign = pkgs.callPackage ./altsign-spm.nix {};
+  
+  # libimobiledevice and dependencies for iOS
+  libimobiledevice = pkgs.callPackage ./libimobiledevice.nix {
+    inherit lib pkgs;
+    buildPackages = pkgs.buildPackages;
+    fetchFromGitHub = pkgs.fetchFromGitHub;
+  };
 in
 
 {
-  inherit em-proxy minimuxer roxas altsign;
+  inherit em-proxy minimuxer roxas altsign libimobiledevice;
   
   # Combined bundle for easy integration
   all = pkgs.stdenv.mkDerivation {

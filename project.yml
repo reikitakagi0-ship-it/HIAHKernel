@@ -36,6 +36,10 @@ settings:
     # User Script Sandboxing - DISABLED for build scripts that need file access
     ENABLE_USER_SCRIPT_SANDBOXING: NO
     BUILD_LIBRARY_FOR_DISTRIBUTION: NO
+    
+    # Exclude x86_64 for simulator - our vendor libs only support arm64 simulator
+    # This only affects simulator builds; real device builds are always arm64
+    EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
   configs:
     Debug:
       ONLY_ACTIVE_ARCH: YES
@@ -91,6 +95,10 @@ targets:
       # Signer (used by extension)
       - path: src/extension/HIAHSigner.h
       - path: src/extension/HIAHSigner.m
+      
+      # Bypass status (extension can read shared status)
+      - path: src/extension/HIAHBypassStatus.h
+      - path: src/extension/HIAHBypassStatus.m
       
       # Logging system (shared with extension)
       - path: src/HIAHDesktop/HIAHLogging.h
@@ -162,6 +170,20 @@ targets:
         inputFiles:
           - "${SRCROOT}/src/extension/Info.plist"
   
+  # ============================================================================
+  # HIAHVPNExtension - DISABLED
+  # ============================================================================
+  # Network Extensions require a PAID Apple Developer account ($99/year).
+  # Personal/free developer accounts do not support this capability.
+  #
+  # To enable VPN functionality, you need either:
+  # 1. A paid Apple Developer Program membership
+  # 2. Use the StoreAppsVPN approach (like SideStore does with WireGuard)
+  #
+  # The VPN extension files are kept in: src/HIAHLoginWindow/VPN/Extension/
+  # Uncomment this target when you have a paid developer account.
+  # ============================================================================
+  
   HIAHDesktop:
     type: application
     platform: iOS
@@ -170,13 +192,19 @@ targets:
       SystemCapabilities:
         com.apple.ApplicationGroups.iOS:
           enabled: true
-        com.apple.NetworkExtensions.iOS:
-          enabled: true
+        # Network Extensions requires paid Apple Developer account:
+        # com.apple.NetworkExtensions.iOS:
+        #   enabled: true
     
     dependencies:
       - target: HIAHProcessRunner
         embed: true
         link: false
+      # NOTE: VPN Extension disabled - requires paid Apple Developer account
+      # Uncomment when you have a paid developer account:
+      # - target: HIAHVPNExtension
+      #   embed: true
+      #   link: false
       - package: AltSign
         product: AltSign-Static
       - package: Roxas
@@ -208,6 +236,20 @@ targets:
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         
+        # URL schemes we need to query (required for canOpenURL: to work on iOS)
+        LSApplicationQueriesSchemes:
+          - wireguard
+          - itms-apps
+        
+        # Background modes for certificate refresh
+        UIBackgroundModes:
+          - fetch
+          - processing
+        
+        # Background task identifiers (required for BGTaskScheduler)
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.aspauldingcode.HIAHDesktop.refresh
+        
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: true
           UISceneConfigurations:
@@ -238,13 +280,23 @@ targets:
         excludes:
           - "LoginWindowApp.swift"  # Exclude @main - HIAHDesktop has its own main
       - path: src/HIAHLoginWindow/Auth
-      - path: src/HIAHLoginWindow/VPN/VPNManager.swift
       - path: src/HIAHLoginWindow/VPN/EMProxyBridge.h
       - path: src/HIAHLoginWindow/VPN/EMProxyBridge.m
+      - path: src/HIAHLoginWindow/VPN/HIAHVPNStateMachine.h
+      - path: src/HIAHLoginWindow/VPN/HIAHVPNStateMachine.m
       - path: src/HIAHLoginWindow/VPN/HIAHVPNManager.h
       - path: src/HIAHLoginWindow/VPN/HIAHVPNManager.m
+      - path: src/HIAHLoginWindow/VPN/HIAHVPN.h
+      - path: src/HIAHLoginWindow/VPN/HIAHVPN.m
+      - path: src/HIAHLoginWindow/VPN/WireGuard/HIAHWireGuardManager.h
+      - path: src/HIAHLoginWindow/VPN/WireGuard/HIAHWireGuardManager.m
+      - path: src/HIAHLoginWindow/VPN/WireGuard/HIAHWireGuardSetupViewController.h
+      - path: src/HIAHLoginWindow/VPN/WireGuard/HIAHWireGuardSetupViewController.m
+      - path: src/HIAHLoginWindow/VPN/WireGuard/HIAHVPNSetupViewController.h
+      - path: src/HIAHLoginWindow/VPN/WireGuard/HIAHVPNSetupViewController.m
       - path: src/HIAHLoginWindow/VPN/MinimuxerBridge.h
       - path: src/HIAHLoginWindow/VPN/MinimuxerBridge.m
+      - path: src/HIAHLoginWindow/JIT
       - path: src/HIAHLoginWindow/Signing
       - path: src/HIAHLoginWindow/Refresh
       - path: src/HIAHLoginWindow/HIAHLoginWindow-Bridging-Header.h
@@ -253,8 +305,20 @@ targets:
       - path: src/HIAHDesktop/HIAHMachOUtils.h
       - path: src/HIAHDesktop/HIAHMachOUtils.m
       
+      # Signer (shared with extension)
+      - path: src/extension/HIAHSigner.h
+      - path: src/extension/HIAHSigner.m
+      
       # Swift Bridge
       - path: src/HIAHDesktop/HIAHSwiftBridge.swift
+      
+      # Minimuxer Swift Bridge (DISABLED - requires libimobiledevice)
+      # The minimuxer library requires libimobiledevice which has API incompatibilities
+      # with the version bundled in AltSign. Once we resolve the libplist version conflict,
+      # uncomment the following lines and add -lminimuxer-sim/-lminimuxer-ios to OTHER_LDFLAGS:
+      # - path: vendor/sidestore/include/SwiftBridgeCore.swift
+      # - path: vendor/sidestore/include/minimuxer.swift
+      # - path: vendor/sidestore/include/minimuxer-helpers.swift
       
       # Hooks
       - path: src/hooks
@@ -302,6 +366,7 @@ targets:
         - $(SRCROOT)/vendor/local_packages/AltSign/AltSign/include
         - $(SRCROOT)/vendor/local_packages/Roxas/Sources/Roxas/include
         - $(SRCROOT)/vendor/local_packages/Roxas/Sources/Roxas/include/Roxas
+        # libimobiledevice headers (disabled until version conflict resolved)
       
       LIBRARY_SEARCH_PATHS:
         - $(SRCROOT)/vendor/sidestore/lib
@@ -310,7 +375,8 @@ targets:
         - -lz
         - -ObjC
         - -lem_proxy-sim
-        - -lminimuxer-sim
+        # NOTE: minimuxer disabled until libimobiledevice version conflict is resolved
+        # - -lminimuxer-sim
         # Suppress linker warnings about version mismatches
         # These warnings occur because prebuilt libraries contain many object files (.o),
         # each checked individually. Libraries built with iOS 26.1 SDK are backward compatible with iOS 16.0+.
@@ -320,7 +386,8 @@ targets:
         - -lz
         - -ObjC
         - -lem_proxy-ios
-        - -lminimuxer-ios
+        # NOTE: minimuxer disabled until libimobiledevice version conflict is resolved
+        # - -lminimuxer-ios
         # Suppress linker warnings about version mismatches
         # These warnings occur because prebuilt libraries contain many object files (.o),
         # each checked individually. Libraries built with iOS 26.1 SDK are backward compatible with iOS 16.0+.

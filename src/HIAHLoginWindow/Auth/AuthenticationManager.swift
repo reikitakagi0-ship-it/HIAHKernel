@@ -25,7 +25,7 @@ enum AuthenticationError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidCredentials:
-            return "Invalid Apple ID or password"
+            return "Invalid Apple Account email or password"
         case .networkError:
             return "Network connection failed. Please check your internet connection."
         case .certificateDownloadFailed:
@@ -101,7 +101,7 @@ class AuthenticationManager: ObservableObject {
             self.certificateExpirationDate = certificateManager.expirationDate
             
             print("[Auth] ✅ Authentication successful!")
-            
+        
             // Notify observers
             NotificationCenter.default.post(
                 name: NSNotification.Name("HIAHAuthenticationSuccess"),
@@ -191,12 +191,12 @@ class AuthenticationManager: ObservableObject {
         // Check if account manager has a valid session
         if accountManager.isAuthenticated {
             self.appleID = accountManager.account?.appleID
-            self.isAuthenticated = true
+        self.isAuthenticated = true
             self.certificateExpirationDate = certificateManager.expirationDate
             
             if let days = daysUntilExpiration {
                 print("[Auth] Existing auth found - \(days) days until expiration")
-                
+            
                 if days < 2 {
                     print("[Auth] ⚠️ Certificate expiring soon!")
                 }

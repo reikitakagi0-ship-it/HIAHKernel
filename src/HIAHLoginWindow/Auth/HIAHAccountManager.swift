@@ -54,8 +54,9 @@ class HIAHAccountManager: NSObject {
     
     // MARK: - Authentication
     
-    /// Login with Apple ID and password
+    /// Login with Apple Account email and password
     /// - Note: This requires proper Anisette data and may prompt for 2FA
+    /// - Warning: If HIAH VPN is active, Anisette servers may timeout. Disable VPN temporarily to sign in.
     func login(appleID: String, password: String) async throws -> ALTAccount {
         print("[Account] Starting authentication for: \(appleID)")
         
@@ -232,8 +233,8 @@ class HIAHAccountManager: NSObject {
         guard let appleID = defaults.string(forKey: "HIAH_Account_AppleID"),
               let dsid = defaults.string(forKey: "HIAH_Account_DSID") else {
             return nil
-        }
-        
+    }
+    
         // Load auth token from keychain
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

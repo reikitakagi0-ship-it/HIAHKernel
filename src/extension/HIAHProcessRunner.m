@@ -16,6 +16,8 @@
 #import "../hooks/HIAHDyldBypass.h"
 #import "../hooks/HIAHHook.h"
 #import "HIAHSigner.h"
+#import "HIAHBypassStatus.h"
+#import <sys/sysctl.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
@@ -587,15 +589,56 @@ static void ExecuteGuestApplication(NSDictionary *spawnRequest) {
     ExtLog(logFile, "[HIAHExtension] Binary patched to MH_BUNDLE\n");
   }
 
-  // Remove code signature - the patching invalidates it
-  // NOTE: We try dyld bypass first (initialized in ExtensionStartup)
-  // But if that doesn't work (no JIT), we fall back to removing the signature
-  ExtLog(logFile,
-         "[HIAHExtension] Invoking HIAHSigner to sanitize signature...\n");
+  // CRITICAL: Prepare binary for dlopen using signature bypass
+  // This ensures VPN is active, JIT is enabled, and binary is signed if needed
+  ExtLog(logFile, "[HIAHExtension] Preparing binary for dlopen with signature bypass...\n");
+  
+  // Check bypass status using lightweight status reader
+  HIAHBypassStatus *bypassStatus = [HIAHBypassStatus sharedStatus];
+  [bypassStatus refreshStatus];
+  
+  BOOL bypassReady = bypassStatus.isBypassReady;
+  BOOL vpnActive = bypassStatus.isVPNActive;
+  BOOL jitEnabled = bypassStatus.isJITEnabled;
+  
+  ExtLog(logFile, "[HIAHExtension] Bypass status - VPN: %s, JIT: %s, Ready: %s\n",
+         vpnActive ? "YES" : "NO", jitEnabled ? "YES" : "NO", bypassReady ? "YES" : "NO");
+  
+  // Also verify JIT status directly (most reliable check)
+  extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+  #define CS_OPS_STATUS 0
+  #define CS_DEBUGGED 0x10000000
+  
+  int flags = 0;
+  BOOL jitActive = NO;
+  if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0) {
+    jitActive = (flags & CS_DEBUGGED) != 0;
+  }
+  
+  // Use direct JIT check as authoritative
+  if (jitActive && !jitEnabled) {
+    ExtLog(logFile, "[HIAHExtension] JIT is active (direct check) but status file says disabled - updating\n");
+    jitEnabled = YES;
+  }
+  
+  // Determine if we can use signature bypass
+  BOOL canUseBypass = (jitActive && vpnActive);
+  
+  if (!canUseBypass) {
+    ExtLog(logFile, "[HIAHExtension] Signature bypass not available (VPN: %s, JIT: %s) - signing binary as fallback...\n",
+           vpnActive ? "YES" : "NO", jitActive ? "YES" : "NO");
+    // Sign the binary if bypass is not available
   if ([HIAHSigner signBinaryAtPath:executablePath]) {
-    ExtLog(logFile, "[HIAHExtension] HIAHSigner completed successfully\n");
+      ExtLog(logFile, "[HIAHExtension] Binary signed successfully\n");
   } else {
-    ExtLog(logFile, "[HIAHExtension] WARNING: HIAHSigner reported failure\n");
+      ExtLog(logFile, "[HIAHExtension] WARNING: Binary signing failed - dlopen may fail\n");
+    }
+  } else {
+    ExtLog(logFile, "[HIAHExtension] Signature bypass available (VPN + JIT active) - dyld bypass should work\n");
+    ExtLog(logFile, "[HIAHExtension] CS_DEBUGGED flag: %s - dyld will skip signature validation\n",
+           jitActive ? "SET" : "NOT SET");
+    // Still clean up signature for safety (dyld bypass handles validation, but clean sig helps)
+    [HIAHSigner signBinaryAtPath:executablePath];
   }
 
   // Set up bundle context for the guest app

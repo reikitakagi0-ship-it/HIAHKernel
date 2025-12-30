@@ -21,9 +21,18 @@
 // Roxas
 #import <Roxas/Roxas.h>
 
-// Minimuxer (Device communication)
-// TODO: Add when swift-bridge is integrated
-// #import "minimuxer-Bridging-Header.h"
+// Minimuxer (Device communication) - Rust library via swift-bridge
+#import "SwiftBridgeCore.h"
+#import "minimuxer.h"
+
+// HIAH VPN and JIT (WireGuard-based)
+#import "VPN/HIAHVPNManager.h"
+#import "VPN/HIAHVPNStateMachine.h"
+#import "VPN/WireGuard/HIAHWireGuardManager.h"
+#import "JIT/HIAHJITManager.h"
+#import "JIT/HIAHJITEnablerHelper.h"
+#import "Signing/HIAHSignatureBypass.h"
+#import "Signing/HIAHBypassCoordinator.h"
 
 #endif /* HIAHLoginWindow_Bridging_Header_h */
 

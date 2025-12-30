@@ -31,6 +31,7 @@ extern HIAHLogSubsystem HIAHLogProcessManager(void);
 typedef NS_ENUM(NSInteger, HIAHLogLevel) {
   HIAHLogLevelDebug = 0,
   HIAHLogLevelInfo,
+  HIAHLogLevelWarning,
   HIAHLogLevelError,
   HIAHLogLevelFault
 };
@@ -51,6 +52,9 @@ static inline void _HIAHLogPrint(HIAHLogSubsystem subsystem, HIAHLogLevel level,
   switch (level) {
   case HIAHLogLevelInfo:
     levelStr = "INFO";
+    break;
+  case HIAHLogLevelWarning:
+    levelStr = "WARNING";
     break;
   case HIAHLogLevelError:
     levelStr = "ERROR";
@@ -98,6 +102,7 @@ static inline void _HIAHLogPrint(HIAHLogSubsystem subsystem, HIAHLogLevel level,
 // Compatibility Defines
 #define HIAH_LOG_DEBUG HIAHLogLevelDebug
 #define HIAH_LOG_INFO HIAHLogLevelInfo
+#define HIAH_LOG_WARNING HIAHLogLevelWarning
 #define HIAH_LOG_ERROR HIAHLogLevelError
 #define HIAH_LOG_FAULT HIAHLogLevelFault
 

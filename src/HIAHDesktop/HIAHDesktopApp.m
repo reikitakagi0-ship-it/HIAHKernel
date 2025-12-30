@@ -18,6 +18,9 @@
 #import "HIAHTopViewController.h"
 #import "HIAHWindowServer.h"
 #import "HIAHeDisplayMode.h"
+#import "../HIAHLoginWindow/Signing/HIAHSignatureBypass.h"
+#import "../HIAHLoginWindow/VPN/HIAHVPNStateMachine.h"
+#import "../HIAHLoginWindow/VPN/WireGuard/HIAHVPNSetupViewController.h"
 #import <CarPlay/CarPlay.h>
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -1622,7 +1625,8 @@
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 @interface AppDelegate
     : UIResponder <UIApplicationDelegate, CPApplicationDelegate,
-                   HIAHeDisplayModeDelegate, HIAHLoginViewControllerDelegate>
+                   HIAHeDisplayModeDelegate, HIAHLoginViewControllerDelegate,
+                   HIAHVPNSetupDelegate>
 #pragma clang diagnostic pop
 @property(strong, nonatomic)
     NSMutableDictionary<NSValue *, UIWindow *> *windowsByScreen;
@@ -1657,9 +1661,8 @@
 }
 
 - (void)loginDidSucceed {
-  NSLog(@"[AppDelegate] 🎉 loginDidSucceed delegate called - transitioning to Desktop");
+  NSLog(@"[AppDelegate] 🎉 loginDidSucceed delegate called");
   
-  // Use the same transition logic as handleAuthenticationSuccess
   UIWindowScene *windowScene = (UIWindowScene *)[UIApplication sharedApplication]
                              .connectedScenes.anyObject;
   
@@ -1668,7 +1671,48 @@
     return;
   }
   
-  // Dismiss any presented view controller (the login window)
+  // Start VPN state machine
+  [[HIAHVPNStateMachine shared] sendEvent:HIAHVPNEventStart];
+  
+  // Check if VPN setup is needed
+  if ([HIAHVPNSetupViewController isSetupNeeded]) {
+    NSLog(@"[AppDelegate] 📱 VPN setup needed - showing setup wizard");
+    
+    // Get the root view controller to present from
+    UIViewController *rootVC = windowScene.windows.firstObject.rootViewController;
+    UIViewController *presenterVC = rootVC.presentedViewController ?: rootVC;
+    
+    // Present the VPN setup flow
+    [HIAHVPNSetupViewController presentFrom:presenterVC delegate:self];
+  } else {
+    NSLog(@"[AppDelegate] ✅ VPN ready - transitioning to Desktop");
+    [self proceedToDesktopAfterLogin];
+  }
+}
+
+#pragma mark - HIAHVPNSetupDelegate
+
+- (void)vpnSetupDidComplete {
+  NSLog(@"[AppDelegate] ✅ VPN setup completed - transitioning to Desktop");
+  [self proceedToDesktopAfterLogin];
+}
+
+- (void)vpnSetupDidCancel {
+  NSLog(@"[AppDelegate] ⏭️ VPN setup cancelled - transitioning to Desktop anyway");
+  NSLog(@"[AppDelegate] ⚠️ Some features (JIT, unsigned apps) may not work without VPN");
+  [self proceedToDesktopAfterLogin];
+}
+
+- (void)proceedToDesktopAfterLogin {
+  UIWindowScene *windowScene = (UIWindowScene *)[UIApplication sharedApplication]
+                             .connectedScenes.anyObject;
+  
+  if (!windowScene) {
+    NSLog(@"[AppDelegate] ❌ No window scene available");
+    return;
+  }
+  
+  // Dismiss any presented view controller (login or setup)
   UIViewController *rootVC = windowScene.windows.firstObject.rootViewController;
   if (rootVC.presentedViewController) {
     [rootVC dismissViewControllerAnimated:YES completion:^{
@@ -1686,6 +1730,33 @@
   // Initialize Filesystem & Kernel
   [[HIAHFilesystem shared] initialize];
   [HIAHKernel sharedKernel];
+  
+  // Initialize RefreshService for automatic certificate refresh
+  // This handles the 7-day renewal and expiration notifications
+  Class refreshServiceClass = NSClassFromString(@"HIAHDesktop.RefreshService");
+  if (refreshServiceClass) {
+    SEL sharedSel = NSSelectorFromString(@"shared");
+    if ([refreshServiceClass respondsToSelector:sharedSel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+      [refreshServiceClass performSelector:sharedSel];
+#pragma clang diagnostic pop
+      NSLog(@"[AppDelegate] RefreshService initialized for certificate auto-refresh");
+    }
+  }
+
+  // Initialize signature bypass system (VPN + JIT) for dylib loading
+  // This enables unsigned .ipa apps to run inside HIAH Desktop
+  HIAHLogEx(HIAH_LOG_INFO, @"AppDelegate", @"Initializing signature bypass system...");
+  HIAHSignatureBypass *bypass = [HIAHSignatureBypass sharedBypass];
+  [bypass ensureBypassReadyWithCompletion:^(BOOL success, NSError * _Nullable error) {
+    if (success) {
+      HIAHLogEx(HIAH_LOG_INFO, @"AppDelegate", @"Signature bypass system ready - unsigned apps can now run");
+    } else {
+      HIAHLogEx(HIAH_LOG_WARNING, @"AppDelegate", @"Signature bypass initialization failed: %@", error);
+      HIAHLogEx(HIAH_LOG_INFO, @"AppDelegate", @"Apps will need to be signed before loading");
+    }
+  }];
 
   // Register HIAH Desktop itself as a process
   HIAHProcess *desktopProcess =
@@ -1956,7 +2027,7 @@
   NSString *dsid = [defaults stringForKey:@"HIAH_Account_DSID"];
   
   if (!appleID || !dsid) {
-    NSLog(@"[Auth] No saved Apple ID or DSID found");
+    NSLog(@"[Auth] No saved Apple Account or DSID found");
     return NO;
   }
   
@@ -2113,7 +2184,7 @@
   
   // Present as full screen modal
   loginVC.modalPresentationStyle = UIModalPresentationFullScreen;
-  
+
   // Present from any available window scene
   UIWindowScene *scene = (UIWindowScene *)[UIApplication sharedApplication]
                              .connectedScenes.anyObject;
@@ -2132,7 +2203,7 @@
   
   // Title
   UILabel *titleLabel = [[UILabel alloc] init];
-  titleLabel.text = @"Sign in with Apple ID";
+  titleLabel.text = @"Sign in with Apple Account";
   titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleTitle2];
   titleLabel.textAlignment = NSTextAlignmentCenter;
   titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2140,7 +2211,7 @@
   
   // Email field
   UITextField *emailField = [[UITextField alloc] init];
-  emailField.placeholder = @"Apple ID";
+  emailField.placeholder = @"Apple Account email";
   emailField.borderStyle = UITextBorderStyleRoundedRect;
   emailField.keyboardType = UIKeyboardTypeEmailAddress;
   emailField.autocapitalizationType = UITextAutocapitalizationTypeNone;
@@ -2279,6 +2350,12 @@
 
 - (void)transitionToDesktop:(UIWindowScene *)windowScene {
   NSLog(@"[AppDelegate] Creating desktop view");
+  
+  // Hide all existing windows in this scene (login gate, temp windows, etc.)
+  NSArray *existingWindows = [windowScene.windows copy];
+  for (UIWindow *oldWindow in existingWindows) {
+    oldWindow.hidden = YES;
+  }
   
   // Create the desktop window
   UIWindow *desktopWindow = [[UIWindow alloc] initWithWindowScene:windowScene];
@@ -2450,7 +2527,28 @@
     return; // Don't create desktop
   }
 
-  NSLog(@"[SceneDelegate] ✅ User authenticated - creating desktop");
+  NSLog(@"[SceneDelegate] ✅ User authenticated");
+
+  // Start VPN state machine
+  [[HIAHVPNStateMachine shared] sendEvent:HIAHVPNEventStart];
+  
+  // Check if VPN setup is needed (for VPN/JIT features)
+  if ([HIAHVPNSetupViewController isSetupNeeded]) {
+    NSLog(@"[SceneDelegate] 📱 VPN setup needed - showing setup wizard");
+    
+    // Create a temporary window to present from
+    self.window = [[UIWindow alloc] initWithWindowScene:ws];
+    UIViewController *tempVC = [[UIViewController alloc] init];
+    tempVC.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.window.rootViewController = tempVC;
+    [self.window makeKeyAndVisible];
+    
+    // Present setup wizard
+    [HIAHVPNSetupViewController presentFrom:tempVC delegate:ad];
+    return; // Setup wizard will trigger desktop creation when done
+  }
+
+  NSLog(@"[SceneDelegate] ✅ VPN ready - creating desktop");
 
   // Determine if this is the main screen or external screen
   // In iOS 26.0+, compare with first connected scene's screen
@@ -2586,7 +2684,55 @@
 }
 
 - (void)sceneDidBecomeActive:(UIScene *)scene {
+  NSLog(@"[SceneDelegate] Scene became active");
+  
+  // Notify RefreshService that app is active - checks for refresh needs
+  Class refreshServiceClass = NSClassFromString(@"HIAHDesktop.RefreshService");
+  if (refreshServiceClass) {
+    SEL sharedSel = NSSelectorFromString(@"shared");
+    if ([refreshServiceClass respondsToSelector:sharedSel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+      id refreshService = [refreshServiceClass performSelector:sharedSel];
+#pragma clang diagnostic pop
+      if (refreshService) {
+        SEL activeSel = NSSelectorFromString(@"appDidBecomeActive");
+        if ([refreshService respondsToSelector:activeSel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+          [refreshService performSelector:activeSel];
+#pragma clang diagnostic pop
+        }
+      }
+    }
+  }
 }
+
+- (void)sceneDidEnterBackground:(UIScene *)scene {
+  NSLog(@"[SceneDelegate] Scene entered background");
+  
+  // Notify RefreshService to schedule notifications
+  Class refreshServiceClass = NSClassFromString(@"HIAHDesktop.RefreshService");
+  if (refreshServiceClass) {
+    SEL sharedSel = NSSelectorFromString(@"shared");
+    if ([refreshServiceClass respondsToSelector:sharedSel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+      id refreshService = [refreshServiceClass performSelector:sharedSel];
+#pragma clang diagnostic pop
+      if (refreshService) {
+        SEL backgroundSel = NSSelectorFromString(@"appDidEnterBackground");
+        if ([refreshService respondsToSelector:backgroundSel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+          [refreshService performSelector:backgroundSel];
+#pragma clang diagnostic pop
+        }
+      }
+    }
+  }
+}
+
 - (void)sceneWillResignActive:(UIScene *)scene {
 }
 

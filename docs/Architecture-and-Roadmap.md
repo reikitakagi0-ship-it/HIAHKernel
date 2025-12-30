@@ -1,174 +1,183 @@
 # HIAH Desktop: Architecture and Roadmap
 
-## Current State
+## Current State (December 2024)
 
-HIAH Desktop is a virtual iOS desktop environment with process spawning capabilities. Recent refactoring has transformed it from a prototype into a clean, maintainable codebase.
+HIAH Desktop is a virtual iOS desktop environment with process spawning capabilities. The project has evolved from a prototype into a production-ready system with integrated VPN/JIT support.
 
-### Refactoring Summary
+### What's Implemented ✅
 
-**Key Improvements:**
-- Centralized logging system (HIAHLogging)
-- Removed emoji-heavy debugging
-- Structured log levels (Debug/Info/Error)
-- Consistent naming conventions
-- Reduced verbosity by ~40%
-- Professional code structure
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Virtual Desktop Environment | ✅ Complete | Multi-window, app launcher |
+| HIAH Kernel | ✅ Complete | Process management, socket IPC |
+| HIAH ProcessRunner | ✅ Complete | Extension-based app execution |
+| Virtual Filesystem | ✅ Complete | Unix-like filesystem for apps |
+| Apple Account Login | ✅ Complete | Via AltSign + Anisette servers |
+| 2FA Support | ✅ Complete | In-app verification code entry |
+| VPN State Machine | ✅ Complete | Declarative, thread-safe |
+| WireGuard Integration | ✅ Complete | Setup wizard, auto-detection |
+| EM Proxy (loopback) | ✅ Complete | Linked as static library |
+| Bypass Coordinator | ✅ Complete | App Group status sharing |
+| HIAH Top (monitor) | ✅ Complete | Real-time VPN/JIT status |
 
-**Components:**
-- **HIAHKernel**: Virtual process management
-- **HIAHProcessRunner**: Extension-based app execution
-- **HIAHDesktop**: Window manager and UI
-- **HIAHInstaller**: .ipa file extraction and installation
-- **HIAHWindowServer**: Multi-window management
-- **HIAHFilesystem**: Virtual Unix filesystem
+### What's Not Working Yet ❌
 
-## Future: SideStore Integration
+| Feature | Status | Blocker |
+|---------|--------|---------|
+| Unsigned App Execution | ❌ Blocked | JIT (CS_DEBUGGED) not being enabled |
+| Self-Refresh (7-day) | ❌ Not started | Depends on JIT working |
+| Certificate Management | ⚠️ Partial | Login works, signing untested |
 
-### Vision
-
-Transform HIAH Desktop into a fully self-contained iOS desktop environment with integrated SideStore functionality, eliminating the need for external sideloading tools.
-
-### Architecture
+## Architecture
 
 ```
 HIAH Desktop (Main App)
-├── HIAH LoginWindow (SideStore Core)
-│   ├── Apple Account Authentication
-│   ├── Certificate Management
-│   ├── App Signing (AltSign)
-│   └── Self-Refresh (7-day renewal)
-├── HIAH ProcessRunner (LiveProcess-style)
-│   ├── VPN Loopback (EM Proxy)
-│   ├── JIT Enablement
-│   └── App Execution
+├── HIAH LoginWindow (AGPLv3 - SideStore Core)
+│   ├── Apple Account Authentication (AltSign)
+│   ├── Anisette Data (external servers)
+│   ├── VPN State Machine (em_proxy + WireGuard)
+│   └── Bypass Coordinator (App Group)
+├── HIAH ProcessRunner (Extension)
+│   ├── Bypass Status Reader
+│   ├── Dyld Bypass Hooks
+│   └── Guest App Execution
 └── HIAH Desktop Environment
-    ├── Window Manager
+    ├── Window Manager (HIAHWindowServer)
     ├── App Launcher
     └── Virtual Filesystem
 ```
 
-### Components to Integrate
+## VPN State Machine
 
-**1. EM Proxy (VPN Loopback)**
-- Source: `source2/SideStore/em_proxy/`
-- Language: Rust
-- Purpose: VPN tunnel for untethered installation
+The VPN system uses a declarative state machine for robust, predictable behavior:
 
-**2. Minimuxer (Lockdown Muxer)**
-- Source: `source2/SideStore/minimuxer/`
-- Language: Rust
-- Purpose: On-device usbmuxd protocol
+```
+                    ┌──────────────────────────┐
+                    │      HIAHVPNStateMachine │
+                    │   (single source of truth)│
+                    └────────────┬─────────────┘
+                                 │
+   ┌─────────────────────────────┼─────────────────────────────┐
+   │                             │                             │
+   ▼                             ▼                             ▼
+[Idle] ──Start──> [StartingProxy] ──ProxyStarted──> [ProxyReady]
+                        │                                │
+                        │                                │
+                   ProxyFailed                     VPNConnected
+                        │                                │
+                        ▼                                ▼
+                    [Error] <──VPNDisconnected── [Connected]
+```
 
-**3. AltSign (Code Signing)**
-- Source: `source2/SideStore/AltSign/`
-- Language: Objective-C/Swift
-- Purpose: App signing with personal certificate
+**States:**
+- `Idle` - Not running
+- `StartingProxy` - em_proxy is starting
+- `ProxyReady` - em_proxy running, waiting for WireGuard
+- `Connected` - em_proxy + WireGuard both active
+- `Error` - Something failed
 
-**4. Roxas (Utility Framework)**
-- Source: `source2/Dependencies/Roxas/`
-- Language: Objective-C/Swift
-- Purpose: Common utilities
+**VPN Detection:**
+- Uses `test_emotional_damage()` from em_proxy to verify HIAH VPN specifically
+- Does NOT just check for any `utun` interface (user might have other VPNs)
+- Only the state machine updates the bypass coordinator (prevents race conditions)
 
-**5. SideStore Core**
-- Source: `source2/AltStore/`, `source2/SideStore/`
-- Language: Swift
-- Purpose: Apple ID auth, certificate management
+## Known Issues
 
-## Implementation Roadmap
+### 1. JIT Not Being Enabled
+**Symptom:** `[HIAHExtension] Bypass status - VPN: NO, JIT: NO, Ready: NO`
 
-### Phase 1: Dependencies (Week 1)
-Build all SideStore dependencies with Nix:
-- Rust components (em_proxy, minimuxer)
-- Roxas framework
-- AltSign framework
-- libimobiledevice dependencies
+**Root Cause:** The extension process cannot see the main app's state directly. While the bypass coordinator writes to App Group storage, the extension may read stale data or the JIT enabling mechanism isn't actually setting the CS_DEBUGGED flag.
 
-### Phase 2: HIAH LoginWindow (Week 2-3)
-Create login UI with SideStore authentication:
-- Apple Account login interface
-- Certificate download and storage
-- Keychain integration
-- Session management
+**Required:** Minimuxer integration to actually enable JIT via the VPN tunnel.
 
-### Phase 3: VPN Integration (Week 4)
-Integrate EM Proxy for untethered operation:
-- VPN tunnel setup
-- Loopback routing
-- Minimuxer protocol
-- LocalDevVPN entitlement
+### 2. Anisette Server Timeouts
+**Symptom:** Login fails with "request timed out"
 
-### Phase 4: Enhanced ProcessRunner (Week 5)
-LiveProcess-style execution:
-- App signing before loading
-- JIT enablement via VPN
-- Certificate communication
+**Root Cause:** When WireGuard VPN is active, it routes ALL traffic through the loopback (127.0.0.1:65399). This blocks access to external anisette servers.
 
-### Phase 5: Self-Refresh System (Week 6)
-Keep HIAH Desktop alive:
-- Monitor certificate expiration
-- Auto-resign every 7 days
-- Background refresh
-- User notifications
+**Workaround:** Disable WireGuard VPN before signing in with Apple Account.
 
-### Phase 6: Polish (Week 7)
-- UI/UX improvements
-- Error handling
-- Documentation
-- Testing
+**Better Solution (TODO):** Stop routing during auth, or use local anisette via minimuxer.
 
-**Total Time: 7 weeks**
+### 3. Code Signature Invalid on dlopen
+**Symptom:** `dlopen failed: code signature invalid`
+
+**Root Cause:** JIT (CS_DEBUGGED flag) is not enabled. The dyld bypass hooks require JIT to work.
 
 ## Technical Flow
 
-### VPN Loopback
+### How VPN/JIT Should Work
 ```
-HIAH Desktop → Start VPN (EM Proxy)
-             → Creates loopback tunnel
-             → Routes requests through VPN
-             → Minimuxer handles lockdown
-             → iOS thinks requests from computer
-             → Allows installation & JIT!
-```
-
-### Certificate Management
-```
-User Login → Download Cert → Store in Keychain
-          → Create Profile → Sign HIAH Desktop
-          → Sign .ipa apps → Enable JIT
-          → Apps run with JIT!
+1. User launches HIAH Desktop
+2. State machine → [StartingProxy] → em_proxy starts on 127.0.0.1:65399
+3. State machine → [ProxyReady]
+4. User enables WireGuard VPN with HIAH-VPN tunnel
+5. WireGuard connects to em_proxy endpoint
+6. test_emotional_damage() succeeds → [Connected]
+7. Minimuxer connects via em_proxy (TODO)
+8. Minimuxer enables JIT (CS_DEBUGGED flag) (TODO)
+9. Bypass coordinator writes: VPN=YES, JIT=YES
+10. ProcessRunner reads status, uses dyld bypass
+11. dlopen() succeeds on unsigned binary
+12. Guest app runs!
 ```
 
-## Licensing
+### Current Reality
+```
+Steps 1-6 work ✅
+Steps 7-8 NOT IMPLEMENTED - JIT never gets enabled
+Steps 9-11 fail because JIT=NO
+Step 12 fails with "code signature invalid"
+```
 
-### AGPLv3 Compliance
+## Next Steps
 
-SideStore components require AGPLv3. Strategy:
+### Priority 1: Minimuxer Integration
+The missing piece is Minimuxer, which enables JIT by:
+1. Connecting to lockdownd through em_proxy
+2. Starting a debug server
+3. Attaching to the process
+4. Setting the CS_DEBUGGED flag
 
-**Dual License Approach:**
-- HIAH Desktop Core: MIT
-- HIAH LoginWindow: AGPLv3 (SideStore integration)
+**Files to create:**
+- `src/HIAHLoginWindow/JIT/MinimuxerBridge.h/m` - Objective-C wrapper
+- Link `libminimuxer.a` in project.yml
 
-This isolates AGPLv3 requirements to the LoginWindow component.
+### Priority 2: Local Anisette
+To avoid the VPN-blocking-auth problem:
+- Use Minimuxer's local anisette generation
+- Or temporarily disable VPN routing during auth
+
+### Priority 3: Self-Refresh
+Once JIT works:
+- Monitor certificate expiration
+- Auto-resign HIAH Desktop before 7-day expiry
+- Background refresh via iOS background tasks
 
 ## File Structure
 
 ```
-HIAHDesktop/
-├── src/
-│   ├── HIAHLoginWindow/        # AGPLv3
-│   │   ├── Auth/
-│   │   ├── Signing/
-│   │   ├── VPN/
-│   │   └── Refresh/
-│   ├── HIAHDesktop/            # MIT
-│   ├── HIAHProcessRunner/      # MIT
-│   └── ...
-├── dependencies/sidestore/
-│   ├── em-proxy.nix
-│   ├── minimuxer.nix
-│   ├── roxas.nix
-│   └── altsign.nix
-└── LICENSE.AGPLv3
+src/
+├── HIAHDesktop/           # Main app (MIT license)
+│   ├── HIAHDesktopApp.m   # App delegate, scene management
+│   ├── HIAHWindowServer.m # Multi-window management
+│   └── HIAHLogging.h/m    # Centralized logging
+├── HIAHLoginWindow/       # AGPLv3 (SideStore integration)
+│   ├── Auth/              # Apple Account authentication
+│   │   ├── HIAHAccountManager.swift
+│   │   └── AltSignExtensions.swift
+│   ├── VPN/               # VPN management
+│   │   ├── HIAHVPNStateMachine.h/m  # Single source of truth
+│   │   ├── EMProxyBridge.h/m        # em_proxy C library wrapper
+│   │   └── WireGuard/               # WireGuard setup wizard
+│   ├── JIT/               # JIT enablement (TODO: Minimuxer)
+│   └── Signing/           # Bypass coordination
+│       └── HIAHBypassCoordinator.h/m
+├── HIAHTop/               # System monitor
+├── extension/             # ProcessRunner extension
+│   ├── HIAHBypassStatus.h/m  # Reads status from App Group
+│   └── HIAHDyldBypass.h/m    # Dyld hooks (requires JIT)
+└── hooks/                 # Kernel hooks
 ```
 
 ## Resources
@@ -179,19 +188,15 @@ HIAHDesktop/
 - **Jitterbug**: https://github.com/osy/Jitterbug
 - **LocalDevVPN**: https://github.com/jkcoxson/LocalDevVPN
 
-## Success Criteria
+## Licensing
 
-- User installs HIAH Desktop once
-- User logs in with Apple ID
-- HIAH Desktop auto-refreshes itself
-- User can install .ipa files
-- Apps run with JIT enabled
-- No external tools needed
-- Works on non-jailbroken devices
+- **HIAH Desktop Core**: MIT
+- **HIAH LoginWindow**: AGPLv3 (due to SideStore/AltSign integration)
 
 ---
 
-**Current Phase**: Planning  
-**Next Milestone**: Phase 1 (Dependencies)  
-**Status**: Ready to begin implementation
+**Current Phase**: VPN Integration Complete ✅  
+**Blocking Issue**: Minimuxer/JIT not integrated  
+**Next Milestone**: Enable JIT via Minimuxer  
+**Status**: Apps cannot run unsigned until JIT is enabled
 

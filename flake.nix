@@ -350,6 +350,10 @@ ENTEOF
           roxas = sidestore.roxas;
           altsign = sidestore.altsign;
           sidestore-all = sidestore.all;
+          
+          # libimobiledevice for iOS (minimuxer dependency)
+          libimobiledevice-ios-sim = sidestore.libimobiledevice.ios-sim;
+          libimobiledevice-ios = sidestore.libimobiledevice.ios;
         };
 
         apps = {

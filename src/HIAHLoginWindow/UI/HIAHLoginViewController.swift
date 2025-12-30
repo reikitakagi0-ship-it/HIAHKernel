@@ -47,13 +47,13 @@ class HIAHLoginViewController: UIViewController {
         ])
         
         // Title
-        titleLabel.text = "Sign in with Apple ID"
+        titleLabel.text = "Sign in with Apple Account"
         titleLabel.font = .preferredFont(forTextStyle: .title2)
         titleLabel.textAlignment = .center
         stackView.addArrangedSubview(titleLabel)
         
         // Email
-        emailField.placeholder = "Apple ID"
+        emailField.placeholder = "Apple Account email"
         emailField.borderStyle = .roundedRect
         emailField.keyboardType = .emailAddress
         emailField.autocapitalizationType = .none

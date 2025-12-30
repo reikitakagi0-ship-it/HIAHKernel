@@ -21,16 +21,18 @@ enum AltSignError: Error, LocalizedError {
     case provisioningFailed(String)
     case signingFailed(String)
     case invalidAnisetteData
+    case anisetteServerTimeout
     case networkError(Error)
     
     var errorDescription: String? {
         switch self {
         case .authenticationFailed(let msg): return "Authentication failed: \(msg)"
-        case .noTeamsFound: return "No development teams found for this Apple ID"
+        case .noTeamsFound: return "No development teams found for this Apple Account"
         case .certificateFailed(let msg): return "Certificate error: \(msg)"
         case .provisioningFailed(let msg): return "Provisioning profile error: \(msg)"
         case .signingFailed(let msg): return "Signing failed: \(msg)"
-        case .invalidAnisetteData: return "Failed to fetch Anisette data"
+        case .invalidAnisetteData: return "Failed to fetch Anisette data from all servers"
+        case .anisetteServerTimeout: return "Anisette servers timed out. If using WireGuard VPN, try disabling it temporarily to sign in."
         case .networkError(let error): return "Network error: \(error.localizedDescription)"
         }
     }
@@ -166,6 +168,14 @@ struct AnisetteData {
                 print("[Anisette] Server \(serverURL) failed: \(error.localizedDescription)")
                 lastError = error
                 continue
+            }
+        }
+        
+        // Check if all failures were timeouts (likely VPN interference)
+        if let urlError = lastError as? URLError {
+            if urlError.code == .timedOut || urlError.code == .networkConnectionLost {
+                print("[Anisette] ⚠️ All servers timed out - VPN might be interfering")
+                throw AltSignError.anisetteServerTimeout
             }
         }
         
