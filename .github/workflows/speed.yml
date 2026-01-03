@@ -104,7 +104,7 @@ jobs:
 
       # 7. Upload artifacts
       - name: Upload built iOS dependencies
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ios-deps
           path: artifacts/ios-deps.zip
