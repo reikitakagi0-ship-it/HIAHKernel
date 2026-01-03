@@ -3,7 +3,6 @@ name: Build HIAHKernel (iOS, Xcode 26, Nix)
 on:
   push:
     branches: [ main ]
-  pull_request:
 
 jobs:
   build-ios:
