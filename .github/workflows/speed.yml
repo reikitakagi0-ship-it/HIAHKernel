@@ -1,9 +1,8 @@
 name: Build iOS deps with auto-fix hashes
 
+# 手動実行トリガー
 on:
-  push:
-    branches: [ main ]
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -102,7 +101,7 @@ jobs:
           cd artifacts
           zip -r ios-deps.zip result
 
-      # 7. Upload artifacts
+      # 7. Upload artifacts（v4に更新）
       - name: Upload built iOS dependencies
         uses: actions/upload-artifact@v4
         with:
