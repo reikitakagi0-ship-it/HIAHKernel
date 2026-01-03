@@ -29,8 +29,17 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        submodules: recursive
+        submodules: false  # サブモジュールは使用しない（Nixでビルド）
         fetch-depth: 0
+    
+    - name: Clean up invalid submodules
+      run: |
+        # .gitmodulesに古い参照がある場合は削除
+        if [ -f ".gitmodules" ]; then
+          echo "Removing .gitmodules (dependencies are built by Nix)"
+          rm -f .gitmodules
+          git config --file .git/config --remove-section submodule 2>/dev/null || true
+        fi
     
     - name: Setup Xcode
       uses: maxim-lobanov/setup-xcode@v1
