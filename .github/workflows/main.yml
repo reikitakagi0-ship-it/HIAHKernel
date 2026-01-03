@@ -1,0 +1,509 @@
+name: Build iOS (Device) - Unsigned
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: 'Build configuration'
+        required: false
+        default: 'Release'
+        type: choice
+        options:
+          - Debug
+          - Release
+
+env:
+  XCODE_VERSION: '15.2'
+  IOS_DEPLOYMENT_TARGET: '16.0'
+
+jobs:
+  build-ios-device:
+    name: Build for iOS Device (Unsigned)
+    runs-on: macos-14
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+    
+    - name: Setup Xcode
+      uses: maxim-lobanov/setup-xcode@v1
+      with:
+        xcode-version: ${{ env.XCODE_VERSION }}
+    
+    - name: Install Nix
+      uses: cachix/install-nix-action@v25
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+        extra_nix_config: |
+          experimental-features = nix-command flakes
+          accept-flake-config = true
+    
+    - name: Setup Nix Cache (optional)
+      if: env.CACHIX_AUTH_TOKEN != ''
+      uses: cachix/cachix-action@v14
+      env:
+        CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      with:
+        name: hiahkernel
+        authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+        skipPush: ${{ github.event_name == 'pull_request' }}
+    
+    # ====================
+    # Build Dependencies via Nix
+    # ====================
+    
+    - name: Build all iOS dependencies via Nix
+      run: |
+        echo "📦 Building all dependencies for iOS Device..."
+        echo ""
+        
+        # Build OpenSSL
+        echo "1/7 Building OpenSSL..."
+        nix build '.#openssl-ios' --print-build-logs --no-link
+        OPENSSL_IOS=$(nix build '.#openssl-ios' --print-out-paths --no-link)
+        echo "OPENSSL_IOS=$OPENSSL_IOS" >> $GITHUB_ENV
+        echo "  ✓ OpenSSL: $OPENSSL_IOS"
+        
+        # Build zsign (depends on OpenSSL)
+        echo "2/7 Building zsign..."
+        nix build '.#zsign-ios' --print-build-logs --no-link
+        ZSIGN_IOS=$(nix build '.#zsign-ios' --print-out-paths --no-link)
+        echo "ZSIGN_IOS=$ZSIGN_IOS" >> $GITHUB_ENV
+        echo "  ✓ zsign: $ZSIGN_IOS"
+        
+        # Build libplist
+        echo "3/7 Building libplist..."
+        nix build '.#libplist-ios' --print-build-logs --no-link
+        LIBPLIST_IOS=$(nix build '.#libplist-ios' --print-out-paths --no-link)
+        echo "LIBPLIST_IOS=$LIBPLIST_IOS" >> $GITHUB_ENV
+        echo "  ✓ libplist: $LIBPLIST_IOS"
+        
+        # Build libimobiledevice-glue (depends on libplist)
+        echo "4/7 Building libimobiledevice-glue..."
+        nix build '.#libimobiledevice-glue-ios' --print-build-logs --no-link
+        LIBIMOBILEDEVICE_GLUE_IOS=$(nix build '.#libimobiledevice-glue-ios' --print-out-paths --no-link)
+        echo "LIBIMOBILEDEVICE_GLUE_IOS=$LIBIMOBILEDEVICE_GLUE_IOS" >> $GITHUB_ENV
+        echo "  ✓ libimobiledevice-glue: $LIBIMOBILEDEVICE_GLUE_IOS"
+        
+        # Build libusbmuxd (depends on libplist, libimobiledevice-glue)
+        echo "5/7 Building libusbmuxd..."
+        nix build '.#libusbmuxd-ios' --print-build-logs --no-link
+        LIBUSBMUXD_IOS=$(nix build '.#libusbmuxd-ios' --print-out-paths --no-link)
+        echo "LIBUSBMUXD_IOS=$LIBUSBMUXD_IOS" >> $GITHUB_ENV
+        echo "  ✓ libusbmuxd: $LIBUSBMUXD_IOS"
+        
+        # Build libimobiledevice (depends on libplist, libimobiledevice-glue, libusbmuxd)
+        echo "6/7 Building libimobiledevice..."
+        nix build '.#libimobiledevice-standalone-ios' --print-build-logs --no-link
+        LIBIMOBILEDEVICE_IOS=$(nix build '.#libimobiledevice-standalone-ios' --print-out-paths --no-link)
+        echo "LIBIMOBILEDEVICE_IOS=$LIBIMOBILEDEVICE_IOS" >> $GITHUB_ENV
+        echo "  ✓ libimobiledevice: $LIBIMOBILEDEVICE_IOS"
+        
+        # Build SideStore components
+        echo "7/7 Building SideStore components..."
+        
+        # em-proxy
+        nix build '.#em-proxy' --print-build-logs --no-link
+        EM_PROXY=$(nix build '.#em-proxy' --print-out-paths --no-link)
+        echo "EM_PROXY=$EM_PROXY" >> $GITHUB_ENV
+        echo "  ✓ em-proxy: $EM_PROXY"
+        
+        # minimuxer-ios
+        nix build '.#minimuxer-ios' --print-build-logs --no-link
+        MINIMUXER_IOS=$(nix build '.#minimuxer-ios' --print-out-paths --no-link)
+        echo "MINIMUXER_IOS=$MINIMUXER_IOS" >> $GITHUB_ENV
+        echo "  ✓ minimuxer-ios: $MINIMUXER_IOS"
+        
+        # AltSign
+        nix build '.#altsign' --print-build-logs --no-link
+        ALTSIGN=$(nix build '.#altsign' --print-out-paths --no-link)
+        echo "ALTSIGN=$ALTSIGN" >> $GITHUB_ENV
+        echo "  ✓ AltSign: $ALTSIGN"
+        
+        # Roxas
+        nix build '.#roxas' --print-build-logs --no-link
+        ROXAS=$(nix build '.#roxas' --print-out-paths --no-link)
+        echo "ROXAS=$ROXAS" >> $GITHUB_ENV
+        echo "  ✓ Roxas: $ROXAS"
+        
+        echo ""
+        echo "✅ All dependencies built successfully"
+    
+    # ====================
+    # Stage Dependencies (mimic xcgen script)
+    # ====================
+    
+    - name: Stage dependencies for Xcode
+      run: |
+        echo "📦 Staging dependencies (following xcgen script logic)..."
+        
+        # Create directory structure
+        mkdir -p dependencies/openssl/{lib-ios,include}
+        mkdir -p dependencies/zsign/{lib,include/zsign/common}
+        mkdir -p dependencies/libimobiledevice/{lib-ios,include}
+        mkdir -p dependencies/sidestore/{lib,include}
+        mkdir -p dependencies/swift-packages
+        
+        # Stage OpenSSL
+        echo "→ Staging OpenSSL..."
+        if [ -d "$OPENSSL_IOS/lib" ]; then
+          cp "$OPENSSL_IOS/lib"/*.a dependencies/openssl/lib-ios/ 2>/dev/null || true
+          cp -r "$OPENSSL_IOS/include"/* dependencies/openssl/include/ 2>/dev/null || true
+          echo "  ✓ OpenSSL libraries: $(ls dependencies/openssl/lib-ios/*.a | wc -l) files"
+        fi
+        
+        # Stage zsign
+        echo "→ Staging zsign..."
+        if [ -d "$ZSIGN_IOS/lib" ] && [ -f "$ZSIGN_IOS/lib/libzsign.a" ]; then
+          cp "$ZSIGN_IOS/lib/libzsign.a" dependencies/zsign/lib/libzsign-ios.a
+          echo "  ✓ zsign library: libzsign-ios.a"
+        fi
+        if [ -d "$ZSIGN_IOS/include/zsign" ]; then
+          cp -r "$ZSIGN_IOS/include/zsign"/* dependencies/zsign/include/zsign/ 2>/dev/null || true
+          echo "  ✓ zsign headers: $(find dependencies/zsign/include -name '*.h' | wc -l) files"
+        fi
+        
+        # Stage libimobiledevice stack
+        echo "→ Staging libimobiledevice stack..."
+        for lib_name in LIBPLIST LIBIMOBILEDEVICE_GLUE LIBUSBMUXD LIBIMOBILEDEVICE; do
+          var="${lib_name}_IOS"
+          path="${!var}"
+          if [ -d "$path/lib" ]; then
+            cp "$path/lib"/*.a dependencies/libimobiledevice/lib-ios/ 2>/dev/null || true
+          fi
+          if [ -d "$path/include" ]; then
+            cp -r "$path/include"/* dependencies/libimobiledevice/include/ 2>/dev/null || true
+          fi
+        done
+        echo "  ✓ libimobiledevice libraries: $(ls dependencies/libimobiledevice/lib-ios/*.a 2>/dev/null | wc -l) files"
+        echo "  ✓ libimobiledevice headers: $(find dependencies/libimobiledevice/include -name '*.h' 2>/dev/null | wc -l) files"
+        
+        # Stage SideStore libraries
+        echo "→ Staging SideStore libraries..."
+        if [ -d "$EM_PROXY/lib" ] && [ -f "$EM_PROXY/lib/libem_proxy.a" ]; then
+          cp "$EM_PROXY/lib/libem_proxy.a" dependencies/sidestore/lib/libem_proxy-ios.a
+          echo "  ✓ em_proxy: libem_proxy-ios.a"
+        fi
+        
+        if [ -d "$MINIMUXER_IOS/lib" ] && [ -f "$MINIMUXER_IOS/lib/libminimuxer.a" ]; then
+          cp "$MINIMUXER_IOS/lib/libminimuxer.a" dependencies/sidestore/lib/libminimuxer-ios.a
+          echo "  ✓ minimuxer: libminimuxer-ios.a"
+        fi
+        
+        # Stage minimuxer Swift bridge files
+        if [ -d "$MINIMUXER_IOS/include" ]; then
+          cp "$MINIMUXER_IOS/include"/*.swift dependencies/sidestore/include/ 2>/dev/null || true
+          echo "  ✓ minimuxer Swift bridges: $(ls dependencies/sidestore/include/*.swift 2>/dev/null | wc -l) files"
+        fi
+        
+        # Stage Swift packages (AltSign and Roxas)
+        echo "→ Staging Swift packages..."
+        
+        # AltSign
+        if [ -d "$ALTSIGN/AltSign" ]; then
+          cp -r "$ALTSIGN/AltSign" dependencies/swift-packages/
+          echo "  ✓ AltSign package"
+        elif [ -d "$ALTSIGN" ]; then
+          cp -r "$ALTSIGN" dependencies/swift-packages/AltSign
+          echo "  ✓ AltSign package (alt path)"
+        fi
+        
+        # Roxas
+        if [ -d "$ROXAS/Roxas" ]; then
+          cp -r "$ROXAS/Roxas" dependencies/swift-packages/
+          echo "  ✓ Roxas package"
+        elif [ -d "$ROXAS" ]; then
+          cp -r "$ROXAS" dependencies/swift-packages/Roxas
+          echo "  ✓ Roxas package (alt path)"
+        fi
+        
+        # Make all staged files writable
+        chmod -R u+w dependencies/ 2>/dev/null || true
+        
+        # Clean up Swift packages (remove Xcode projects, etc.)
+        echo "→ Cleaning Swift packages..."
+        find dependencies/swift-packages -name "*.xcodeproj" -type d -exec rm -rf {} + 2>/dev/null || true
+        find dependencies/swift-packages -name "*.xcworkspace" -type d -exec rm -rf {} + 2>/dev/null || true
+        find dependencies/swift-packages -name ".swiftpm" -type d -exec rm -rf {} + 2>/dev/null || true
+        find dependencies/swift-packages -name ".build" -type d -exec rm -rf {} + 2>/dev/null || true
+        
+        # Remove invalid OpenSSL.xcframework code signature
+        rm -rf dependencies/swift-packages/AltSign/Dependencies/OpenSSL/Frameworks/OpenSSL.xcframework/_CodeSignature 2>/dev/null || true
+        
+        echo ""
+        echo "✅ All dependencies staged successfully"
+        echo ""
+        echo "Staged structure:"
+        echo "  dependencies/openssl/lib-ios/: $(ls dependencies/openssl/lib-ios/*.a 2>/dev/null | wc -l) libraries"
+        echo "  dependencies/zsign/lib/: $(ls dependencies/zsign/lib/*.a 2>/dev/null | wc -l) libraries"
+        echo "  dependencies/libimobiledevice/lib-ios/: $(ls dependencies/libimobiledevice/lib-ios/*.a 2>/dev/null | wc -l) libraries"
+        echo "  dependencies/sidestore/lib/: $(ls dependencies/sidestore/lib/*.a 2>/dev/null | wc -l) libraries"
+        echo "  dependencies/swift-packages/: $(ls -d dependencies/swift-packages/*/ 2>/dev/null | wc -l) packages"
+    
+    # ====================
+    # Generate Xcode Project
+    # ====================
+    
+    - name: Install XcodeGen
+      run: |
+        brew install xcodegen
+    
+    - name: Generate Xcode project with XcodeGen
+      run: |
+        echo "🔨 Generating Xcode project..."
+        
+        # Verify project.yml exists
+        if [ ! -f "project.yml" ]; then
+          echo "❌ project.yml not found!"
+          exit 1
+        fi
+        
+        # Generate project
+        xcodegen generate
+        
+        # Verify project was created
+        if [ ! -d "HIAHDesktop.xcodeproj" ]; then
+          echo "❌ HIAHDesktop.xcodeproj was not created!"
+          exit 1
+        fi
+        
+        echo "✅ HIAHDesktop.xcodeproj generated successfully"
+        
+        # List targets
+        echo ""
+        echo "Project targets:"
+        xcodebuild -project HIAHDesktop.xcodeproj -list
+    
+    - name: Resolve Swift Package Dependencies
+      run: |
+        echo "📦 Resolving Swift Package Dependencies..."
+        
+        xcodebuild -resolvePackageDependencies \
+          -project HIAHDesktop.xcodeproj \
+          -scheme HIAHDesktop \
+          2>&1 || echo "⚠️  Package resolution completed with warnings (non-fatal)"
+        
+        echo "✅ Package resolution completed"
+    
+    # ====================
+    # Build for iOS Device (Unsigned)
+    # ====================
+    
+    - name: Build HIAHDesktop for iOS Device (Unsigned)
+      env:
+        CONFIGURATION: ${{ github.event.inputs.configuration || 'Release' }}
+      run: |
+        echo "🔨 Building HIAHDesktop for iOS Device..."
+        echo ""
+        echo "Configuration: $CONFIGURATION"
+        echo "SDK: iphoneos"
+        echo "Signing: DISABLED (unsigned build)"
+        echo ""
+        
+        # Build without signing
+        set -o pipefail
+        xcodebuild \
+          -project HIAHDesktop.xcodeproj \
+          -scheme HIAHDesktop \
+          -sdk iphoneos \
+          -configuration $CONFIGURATION \
+          -archivePath ./build/HIAHDesktop.xcarchive \
+          -destination 'generic/platform=iOS' \
+          CODE_SIGN_IDENTITY="" \
+          CODE_SIGNING_REQUIRED=NO \
+          CODE_SIGNING_ALLOWED=NO \
+          ENABLE_BITCODE=NO \
+          archive 2>&1 | tee build.log
+        
+        BUILD_RESULT=${PIPESTATUS[0]}
+        
+        if [ $BUILD_RESULT -eq 0 ]; then
+          echo ""
+          echo "✅ Build completed successfully"
+        else
+          echo ""
+          echo "❌ Build failed with exit code $BUILD_RESULT"
+          echo ""
+          echo "Last 50 lines of build log:"
+          tail -50 build.log
+          exit $BUILD_RESULT
+        fi
+    
+    - name: Verify xcarchive structure
+      run: |
+        echo "📦 Verifying xcarchive structure..."
+        
+        ARCHIVE_PATH="./build/HIAHDesktop.xcarchive"
+        
+        if [ ! -d "$ARCHIVE_PATH" ]; then
+          echo "❌ xcarchive not found at $ARCHIVE_PATH"
+          exit 1
+        fi
+        
+        echo "✅ xcarchive exists"
+        echo ""
+        echo "Archive structure:"
+        tree -L 3 "$ARCHIVE_PATH" || find "$ARCHIVE_PATH" -maxdepth 3 -print
+        
+        echo ""
+        echo "App bundle contents:"
+        APP_BUNDLE="$ARCHIVE_PATH/Products/Applications/HIAHDesktop.app"
+        if [ -d "$APP_BUNDLE" ]; then
+          echo "✅ HIAHDesktop.app found"
+          ls -lh "$APP_BUNDLE" | head -20
+          
+          # Check for key components
+          echo ""
+          echo "Key components:"
+          [ -f "$APP_BUNDLE/HIAHDesktop" ] && echo "  ✓ Main executable" || echo "  ✗ Main executable MISSING"
+          [ -f "$APP_BUNDLE/Info.plist" ] && echo "  ✓ Info.plist" || echo "  ✗ Info.plist MISSING"
+          [ -d "$APP_BUNDLE/PlugIns/HIAHProcessRunner.appex" ] && echo "  ✓ HIAHProcessRunner.appex" || echo "  ✗ Extension MISSING"
+          [ -d "$APP_BUNDLE/Frameworks" ] && echo "  ✓ Frameworks directory" || echo "  ✗ Frameworks MISSING"
+          
+          # Check extension
+          if [ -d "$APP_BUNDLE/PlugIns/HIAHProcessRunner.appex" ]; then
+            echo ""
+            echo "Extension contents:"
+            ls -lh "$APP_BUNDLE/PlugIns/HIAHProcessRunner.appex" | head -10
+          fi
+          
+          # Get app size
+          echo ""
+          APP_SIZE=$(du -sh "$APP_BUNDLE" | cut -f1)
+          echo "App bundle size: $APP_SIZE"
+          
+        else
+          echo "❌ HIAHDesktop.app not found in archive!"
+          exit 1
+        fi
+    
+    # ====================
+    # Package xcarchive for download
+    # ====================
+    
+    - name: Package xcarchive
+      run: |
+        echo "📦 Packaging xcarchive for download..."
+        
+        cd build
+        
+        # Create zip
+        zip -r -9 HIAHDesktop-iOS-Device.xcarchive.zip HIAHDesktop.xcarchive
+        
+        ZIP_SIZE=$(du -sh HIAHDesktop-iOS-Device.xcarchive.zip | cut -f1)
+        echo "✅ Archive packaged: $ZIP_SIZE"
+        
+        # Create checksum
+        shasum -a 256 HIAHDesktop-iOS-Device.xcarchive.zip > HIAHDesktop-iOS-Device.xcarchive.zip.sha256
+        
+        echo ""
+        echo "Checksum:"
+        cat HIAHDesktop-iOS-Device.xcarchive.zip.sha256
+    
+    # ====================
+    # Upload Artifacts
+    # ====================
+    
+    - name: Upload xcarchive (zipped)
+      uses: actions/upload-artifact@v4
+      with:
+        name: HIAHDesktop-iOS-Device-xcarchive
+        path: ./build/HIAHDesktop-iOS-Device.xcarchive.zip
+        retention-days: 30
+        compression-level: 0  # Already compressed
+    
+    - name: Upload checksum
+      uses: actions/upload-artifact@v4
+      with:
+        name: HIAHDesktop-iOS-Device-xcarchive-checksum
+        path: ./build/HIAHDesktop-iOS-Device.xcarchive.zip.sha256
+        retention-days: 30
+    
+    - name: Upload build log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log
+        path: build.log
+        retention-days: 7
+    
+    # ====================
+    # Build Summary
+    # ====================
+    
+    - name: Generate build summary
+      if: always()
+      run: |
+        echo "## 🎉 Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -d "./build/HIAHDesktop.xcarchive" ]; then
+          echo "### ✅ Build Successful" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          APP_BUNDLE="./build/HIAHDesktop.xcarchive/Products/Applications/HIAHDesktop.app"
+          APP_SIZE=$(du -sh "$APP_BUNDLE" 2>/dev/null | cut -f1 || echo "Unknown")
+          ZIP_SIZE=$(du -sh "./build/HIAHDesktop-iOS-Device.xcarchive.zip" 2>/dev/null | cut -f1 || echo "Unknown")
+          
+          echo "**App Bundle Size:** $APP_SIZE" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Archive Size (zipped):** $ZIP_SIZE" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### 📦 Components" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          [ -f "$APP_BUNDLE/HIAHDesktop" ] && echo "- ✅ Main executable" >> $GITHUB_STEP_SUMMARY
+          [ -f "$APP_BUNDLE/Info.plist" ] && echo "- ✅ Info.plist" >> $GITHUB_STEP_SUMMARY
+          [ -d "$APP_BUNDLE/PlugIns/HIAHProcessRunner.appex" ] && echo "- ✅ HIAHProcessRunner extension" >> $GITHUB_STEP_SUMMARY
+          [ -d "$APP_BUNDLE/Frameworks/HIAHKernel.framework" ] && echo "- ✅ HIAHKernel framework" >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📥 Download" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. Go to the **Actions** tab" >> $GITHUB_STEP_SUMMARY
+          echo "2. Click this workflow run" >> $GITHUB_STEP_SUMMARY
+          echo "3. Download **HIAHDesktop-iOS-Device-xcarchive** from Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "4. Unzip the file" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📱 Install on Device" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Option 1: Using Xcode**" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "# Drag HIAHDesktop.xcarchive to Xcode's Organizer" >> $GITHUB_STEP_SUMMARY
+          echo "# Window > Organizer > Archives" >> $GITHUB_STEP_SUMMARY
+          echo "# Select the archive and click 'Distribute App'" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Option 2: Using ios-deploy**" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "ios-deploy --bundle HIAHDesktop.xcarchive/Products/Applications/HIAHDesktop.app" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Option 3: Re-sign and install**" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "# Sign with your own certificate" >> $GITHUB_STEP_SUMMARY
+          echo 'codesign --force --sign "Apple Development: Your Name" \' >> $GITHUB_STEP_SUMMARY
+          echo '  --entitlements HIAHDesktop.entitlements \' >> $GITHUB_STEP_SUMMARY
+          echo "  HIAHDesktop.app" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          
+        else
+          echo "### ❌ Build Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Check the build log for details." >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "---" >> $GITHUB_STEP_SUMMARY
+        echo "*Build configuration: ${{ github.event.inputs.configuration || 'Release' }}*" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "*Platform: iOS Device (arm64)*" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "*Signing: Unsigned (CODE_SIGN_IDENTITY=\"\")*" >> $GITHUB_STEP_SUMMARY
