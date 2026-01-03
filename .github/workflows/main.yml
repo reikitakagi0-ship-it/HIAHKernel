@@ -54,215 +54,239 @@ jobs:
           experimental-features = nix-command flakes
           accept-flake-config = true
     
-    - name: Auto-fix all Nix dependency hashes
+    - name: Auto-fetch and fix all Nix dependency hashes
       run: |
-        echo "🔧 Auto-fixing Nix dependency hashes..."
+        echo "🔧 Auto-fetching and fixing all Nix dependency hashes..."
         echo ""
         
-        # Function to get correct hash from Nix error
-        get_correct_hash() {
+        # Function to fetch correct hash from URL using nix-prefetch-url
+        fetch_hash_from_url() {
           local url=$1
-          echo "  → Fetching correct hash for: $url" >&2
+          echo "    → Fetching hash from: $url" >&2
           
-          # Try to fetch with empty hash and capture the correct one from error
-          local result=$(nix-prefetch-url "$url" 2>&1 || true)
+          # Use nix-prefetch-url to get the correct hash
+          local hash_output=$(nix-prefetch-url "$url" 2>&1)
           
-          # Extract hash from output (first 52-char alphanumeric string)
-          local hash=$(echo "$result" | grep -Eo '[a-z0-9]{52}' | head -1 || echo "")
+          # Extract the base32 hash (52 characters)
+          local base32_hash=$(echo "$hash_output" | tail -1 | tr -d '\n')
           
-          if [ -n "$hash" ]; then
-            # Convert to SRI format
-            echo "sha256-$(nix hash convert --hash-algo sha256 --to sri "$hash" 2>/dev/null || echo "$hash")"
+          if [ ${#base32_hash} -eq 52 ]; then
+            # Convert base32 to SRI format
+            local sri_hash=$(nix hash to-sri --type sha256 "$base32_hash" 2>&1 || echo "")
+            if [ -n "$sri_hash" ]; then
+              echo "$sri_hash"
+            else
+              echo "sha256-$base32_hash"
+            fi
           else
             echo ""
           fi
         }
         
-        # Function to extract URL from fetchurl (BSD grep compatible)
-        extract_fetchurl_url() {
-          local file=$1
-          # Match: url = "..."
-          sed -n 's/.*url[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -1
+        # Function to fetch hash from GitHub tarball
+        fetch_hash_from_github() {
+          local owner=$1
+          local repo=$2
+          local rev=$3
+          
+          echo "    → Fetching hash from GitHub: $owner/$repo @ $rev" >&2
+          
+          # Try using nix-prefetch-github if available
+          if command -v nix-prefetch-github &> /dev/null; then
+            local result=$(nix-prefetch-github "$owner" "$repo" --rev "$rev" 2>&1 || echo "")
+            local hash=$(echo "$result" | grep -o 'sha256-[A-Za-z0-9+/=]*' | head -1)
+            if [ -n "$hash" ]; then
+              echo "$hash"
+              return
+            fi
+          fi
+          
+          # Fallback: fetch tarball URL
+          local tarball_url="https://github.com/$owner/$repo/archive/$rev.tar.gz"
+          fetch_hash_from_url "$tarball_url"
         }
         
-        # Function to extract GitHub info from fetchFromGitHub (BSD grep compatible)
-        extract_github_info() {
+        # Function to update hash in Nix file
+        update_hash_in_file() {
           local file=$1
-          local owner=$(sed -n 's/.*owner[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -1)
-          local repo=$(sed -n 's/.*repo[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -1)
-          local rev=$(sed -n 's/.*rev[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -1)
+          local new_hash=$2
           
-          if [ -n "$owner" ] && [ -n "$repo" ] && [ -n "$rev" ]; then
-            echo "$owner|$repo|$rev"
+          echo "    → Updating hash in $file" >&2
+          
+          # Create backup
+          cp "$file" "$file.backup"
+          
+          # Update all possible hash formats
+          # Format 1: sha256 = "hash";
+          sed -i '' "s/sha256[[:space:]]*=[[:space:]]*\"[^\"]*\"/sha256 = \"$new_hash\"/g" "$file"
+          
+          # Format 2: sha256 = hash; (no quotes)
+          sed -i '' "s/sha256[[:space:]]*=[[:space:]]*[a-z0-9=_-]*[[:space:]]*;/sha256 = \"$new_hash\";/g" "$file"
+          
+          # Format 3: hash = "hash";
+          sed -i '' "s/hash[[:space:]]*=[[:space:]]*\"[^\"]*\"/hash = \"$new_hash\"/g" "$file"
+          
+          # Verify change was made
+          if grep -q "$new_hash" "$file"; then
+            rm "$file.backup"
+            return 0
           else
-            echo ""
+            # Restore backup if update failed
+            mv "$file.backup" "$file"
+            return 1
           fi
         }
         
-        # Function to fix fetchurl-based Nix files
-        fix_fetchurl_hash() {
+        # Function to process fetchurl-based file
+        process_fetchurl_file() {
           local file=$1
           local name=$2
           
-          if [ ! -f "$file" ]; then
-            echo "  ⚠️  File not found: $file"
-            return
-          fi
-          
-          echo "Fixing $name..."
+          echo "Processing $name (fetchurl)..."
           
           # Extract URL
-          local url=$(extract_fetchurl_url "$file")
+          local url=$(sed -n 's/.*url[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -1)
           
           if [ -z "$url" ]; then
-            echo "  ⚠️  Could not extract URL from $file"
-            return
+            echo "  ⚠️  Could not extract URL"
+            return 1
           fi
           
           echo "  URL: $url"
           
-          # Get correct hash
-          local correct_hash=$(get_correct_hash "$url")
+          # Fetch correct hash
+          local correct_hash=$(fetch_hash_from_url "$url")
           
-          if [ -n "$correct_hash" ]; then
-            echo "  ✓ Correct hash: $correct_hash"
-            
-            # Replace all hash formats (BSD sed compatible)
-            sed -i.bak "s|sha256[[:space:]]*=[[:space:]]*\"[^\"]*\"|sha256 = \"$correct_hash\"|g" "$file"
-            sed -i.bak "s|hash[[:space:]]*=[[:space:]]*\"[^\"]*\"|hash = \"$correct_hash\"|g" "$file"
-            # Also handle unquoted base32 hashes
-            sed -i.bak "s|sha256[[:space:]]*=[[:space:]]*[a-z0-9]\{52\}|sha256 = \"$correct_hash\"|g" "$file"
-            
-            rm -f "$file.bak"
-            
-            echo "  ✅ Updated $file"
-          else
-            echo "  ⚠️  Could not fetch correct hash"
+          if [ -z "$correct_hash" ]; then
+            echo "  ❌ Failed to fetch hash"
+            return 1
           fi
           
-          echo ""
+          echo "  ✓ Fetched hash: $correct_hash"
+          
+          # Update file
+          if update_hash_in_file "$file" "$correct_hash"; then
+            echo "  ✅ Updated $file"
+            return 0
+          else
+            echo "  ❌ Failed to update $file"
+            return 1
+          fi
         }
         
-        # Function to fix fetchFromGitHub-based Nix files
-        fix_github_hash() {
+        # Function to process fetchFromGitHub-based file
+        process_github_file() {
           local file=$1
           local name=$2
           
-          if [ ! -f "$file" ]; then
-            echo "  ⚠️  File not found: $file"
-            return
+          echo "Processing $name (fetchFromGitHub)..."
+          
+          # Extract owner, repo, rev
+          local owner=$(sed -n 's/.*owner[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -1)
+          local repo=$(sed -n 's/.*repo[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -1)
+          local rev=$(sed -n 's/.*rev[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -1)
+          
+          if [ -z "$owner" ] || [ -z "$repo" ] || [ -z "$rev" ]; then
+            echo "  ⚠️  Could not extract GitHub info"
+            return 1
           fi
-          
-          echo "Fixing $name (GitHub)..."
-          
-          # Extract GitHub info
-          local github_info=$(extract_github_info "$file")
-          
-          if [ -z "$github_info" ]; then
-            echo "  ⚠️  Could not extract GitHub info from $file"
-            return
-          fi
-          
-          local owner=$(echo "$github_info" | cut -d'|' -f1)
-          local repo=$(echo "$github_info" | cut -d'|' -f2)
-          local rev=$(echo "$github_info" | cut -d'|' -f3)
           
           echo "  GitHub: $owner/$repo @ $rev"
           
-          # Use nix-prefetch-github if available, otherwise nix-prefetch-url
-          local correct_hash=""
+          # Fetch correct hash
+          local correct_hash=$(fetch_hash_from_github "$owner" "$repo" "$rev")
           
-          # Try nix-prefetch-git first (more reliable for GitHub)
-          if command -v nix-prefetch-git &> /dev/null; then
-            local result=$(nix-prefetch-git --url "https://github.com/$owner/$repo" --rev "$rev" --quiet 2>&1 || true)
-            correct_hash=$(echo "$result" | grep -o '"sha256"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || echo "")
-          fi
-          
-          # Fallback to nix-prefetch-url with tarball
           if [ -z "$correct_hash" ]; then
-            local tarball_url="https://github.com/$owner/$repo/archive/$rev.tar.gz"
-            correct_hash=$(get_correct_hash "$tarball_url")
+            echo "  ❌ Failed to fetch hash"
+            return 1
           fi
           
-          if [ -n "$correct_hash" ]; then
-            echo "  ✓ Correct hash: $correct_hash"
-            
-            # Replace hash (BSD sed compatible)
-            sed -i.bak "s|sha256[[:space:]]*=[[:space:]]*\"[^\"]*\"|sha256 = \"$correct_hash\"|g" "$file"
-            sed -i.bak "s|hash[[:space:]]*=[[:space:]]*\"[^\"]*\"|hash = \"$correct_hash\"|g" "$file"
-            
-            rm -f "$file.bak"
-            
+          echo "  ✓ Fetched hash: $correct_hash"
+          
+          # Update file
+          if update_hash_in_file "$file" "$correct_hash"; then
             echo "  ✅ Updated $file"
+            return 0
           else
-            echo "  ⚠️  Could not fetch correct hash"
+            echo "  ❌ Failed to update $file"
+            return 1
           fi
-          
-          echo ""
         }
         
-        # Fix OpenSSL (fetchurl)
-        if [ -f "dependencies/openssl.nix" ]; then
-          fix_fetchurl_hash "dependencies/openssl.nix" "OpenSSL"
-        fi
+        # Process all Nix files in dependencies/
+        echo "Scanning dependencies/ for Nix files..."
+        echo ""
         
-        # Fix zsign (fetchFromGitHub)
-        if [ -f "dependencies/zsign.nix" ]; then
-          if grep -q "fetchFromGitHub" "dependencies/zsign.nix"; then
-            fix_github_hash "dependencies/zsign.nix" "zsign"
-          fi
-        fi
+        SUCCESS_COUNT=0
+        FAIL_COUNT=0
+        SKIP_COUNT=0
         
-        # Fix libplist (fetchFromGitHub)
-        if [ -f "dependencies/libplist.nix" ]; then
-          if grep -q "fetchFromGitHub" "dependencies/libplist.nix"; then
-            fix_github_hash "dependencies/libplist.nix" "libplist"
-          fi
-        fi
-        
-        # Fix libimobiledevice-glue (fetchFromGitHub)
-        if [ -f "dependencies/libimobiledevice-glue.nix" ]; then
-          if grep -q "fetchFromGitHub" "dependencies/libimobiledevice-glue.nix"; then
-            fix_github_hash "dependencies/libimobiledevice-glue.nix" "libimobiledevice-glue"
-          fi
-        fi
-        
-        # Fix libusbmuxd (fetchFromGitHub)
-        if [ -f "dependencies/libusbmuxd.nix" ]; then
-          if grep -q "fetchFromGitHub" "dependencies/libusbmuxd.nix"; then
-            fix_github_hash "dependencies/libusbmuxd.nix" "libusbmuxd"
-          fi
-        fi
-        
-        # Fix libimobiledevice (fetchFromGitHub)
-        if [ -f "dependencies/libimobiledevice.nix" ]; then
-          if grep -q "fetchFromGitHub" "dependencies/libimobiledevice.nix"; then
-            fix_github_hash "dependencies/libimobiledevice.nix" "libimobiledevice"
-          fi
-        fi
-        
-        # Fix any other Nix files in dependencies/ that use fetchurl or fetchFromGitHub
-        echo "Scanning for other dependency files..."
         for nixfile in dependencies/*.nix; do
-          if [ -f "$nixfile" ]; then
-            filename=$(basename "$nixfile" .nix)
-            
-            # Skip already processed files
-            case "$filename" in
-              openssl|zsign|libplist|libimobiledevice-glue|libusbmuxd|libimobiledevice)
-                continue
-                ;;
-            esac
-            
-            if grep -q "fetchurl" "$nixfile"; then
-              fix_fetchurl_hash "$nixfile" "$filename"
-            elif grep -q "fetchFromGitHub" "$nixfile"; then
-              fix_github_hash "$nixfile" "$filename"
-            fi
+          if [ ! -f "$nixfile" ]; then
+            continue
           fi
+          
+          filename=$(basename "$nixfile" .nix)
+          
+          # Check if file uses fetchurl
+          if grep -q "fetchurl" "$nixfile" && ! grep -q "fetchFromGitHub" "$nixfile"; then
+            if process_fetchurl_file "$nixfile" "$filename"; then
+              ((SUCCESS_COUNT++))
+            else
+              ((FAIL_COUNT++))
+            fi
+            echo ""
+            continue
+          fi
+          
+          # Check if file uses fetchFromGitHub
+          if grep -q "fetchFromGitHub" "$nixfile"; then
+            if process_github_file "$nixfile" "$filename"; then
+              ((SUCCESS_COUNT++))
+            else
+              ((FAIL_COUNT++))
+            fi
+            echo ""
+            continue
+          fi
+          
+          # Skip files that don't use fetchurl or fetchFromGitHub
+          echo "Skipping $filename (no fetchurl or fetchFromGitHub)"
+          ((SKIP_COUNT++))
+          echo ""
         done
         
-        echo "✅ All dependency hashes checked and fixed"
+        # Summary
+        echo "========================================"
+        echo "Hash Update Summary"
+        echo "========================================"
+        echo "✅ Successfully updated: $SUCCESS_COUNT files"
+        echo "❌ Failed to update: $FAIL_COUNT files"
+        echo "⏭️  Skipped: $SKIP_COUNT files"
+        echo ""
+        
+        if [ $FAIL_COUNT -gt 0 ]; then
+          echo "⚠️  Some files failed to update. Build may fail."
+        else
+          echo "✅ All hashes updated successfully!"
+        fi
+        
+        # Show git diff for verification
+        echo ""
+        echo "========================================"
+        echo "Changes made to Nix files:"
+        echo "========================================"
+        git diff dependencies/ || echo "No changes detected"
+        
+        # Commit changes if any
+        if ! git diff --quiet dependencies/; then
+          echo ""
+          echo "Committing hash updates..."
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dependencies/*.nix
+          git commit -m "Auto-update Nix dependency hashes [skip ci]" || true
+        fi
     
     - name: Setup Nix Cache (optional)
       if: env.CACHIX_AUTH_TOKEN != ''
