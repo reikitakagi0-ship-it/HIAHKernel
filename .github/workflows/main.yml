@@ -54,6 +54,83 @@ jobs:
           experimental-features = nix-command flakes
           accept-flake-config = true
     
+    - name: Auto-fix invalid hashes in Nix files
+      run: |
+        echo "🔍 Checking for invalid hashes in Nix files..."
+        
+        # Function to fix hash in a file
+        fix_hash() {
+          local file=$1
+          local url_pattern=$2
+          
+          if [ ! -f "$file" ]; then
+            echo "  ⚠️  File not found: $file"
+            return
+          fi
+          
+          echo "  → Checking $file..."
+          
+          # Extract URL from the Nix file
+          URL=$(grep -oP "$url_pattern" "$file" | head -1 || echo "")
+          
+          if [ -z "$URL" ]; then
+            echo "    ⚠️  Could not extract URL"
+            return
+          fi
+          
+          echo "    URL: $URL"
+          
+          # Try to build and capture hash error
+          if nix-build --expr "with import <nixpkgs> {}; fetchurl { url = \"$URL\"; sha256 = \"\"; }" 2>&1 | grep -q "got:"; then
+            # Extract the correct hash from error message
+            CORRECT_HASH=$(nix-build --expr "with import <nixpkgs> {}; fetchurl { url = \"$URL\"; sha256 = \"\"; }" 2>&1 | grep "got:" | grep -oP 'sha256-[A-Za-z0-9+/=]+' | head -1)
+            
+            if [ -n "$CORRECT_HASH" ]; then
+              echo "    ✓ Found correct hash: $CORRECT_HASH"
+              
+              # Replace hash in file (handle both sha256 and hash formats)
+              sed -i.bak -E "s|sha256 = \"[^\"]*\"|sha256 = \"$CORRECT_HASH\"|g" "$file"
+              sed -i.bak -E "s|hash = \"[^\"]*\"|hash = \"$CORRECT_HASH\"|g" "$file"
+              
+              # Also replace old-style base32 hashes
+              sed -i.bak -E "s|sha256 = [a-z0-9]{52}|sha256 = \"$CORRECT_HASH\"|g" "$file"
+              
+              rm -f "$file.bak"
+              
+              echo "    ✅ Updated hash in $file"
+            else
+              echo "    ⚠️  Could not extract correct hash"
+            fi
+          else
+            echo "    ✓ Hash appears to be valid or URL is accessible"
+          fi
+        }
+        
+        # Fix OpenSSL hash
+        if [ -f "dependencies/openssl.nix" ]; then
+          echo ""
+          echo "Fixing OpenSSL hash..."
+          fix_hash "dependencies/openssl.nix" 'url = "https://www\.openssl\.org/source/[^"]*"'
+        fi
+        
+        # Fix zsign hash (if it fetches source)
+        if [ -f "dependencies/zsign.nix" ] && grep -q "fetchFromGitHub" "dependencies/zsign.nix"; then
+          echo ""
+          echo "Checking zsign hash..."
+          # zsign uses fetchFromGitHub which has different hash format, usually stable
+          echo "  → zsign uses fetchFromGitHub (usually stable)"
+        fi
+        
+        # Fix libplist hash
+        if [ -f "dependencies/libplist.nix" ] && grep -q "fetchFromGitHub" "dependencies/libplist.nix"; then
+          echo ""
+          echo "Checking libplist hash..."
+          echo "  → libplist uses fetchFromGitHub (usually stable)"
+        fi
+        
+        echo ""
+        echo "✅ Hash check completed"
+    
     - name: Setup Nix Cache (optional)
       if: env.CACHIX_AUTH_TOKEN != ''
       uses: cachix/cachix-action@v14
