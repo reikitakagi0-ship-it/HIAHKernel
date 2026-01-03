@@ -10,7 +10,7 @@ let
   # OpenSSL 3.3.0 (stable, widely used)
   openssl-src = pkgs.fetchurl {
     url = "https://www.openssl.org/source/openssl-3.3.0.tar.gz";
-    sha256 = "00pv30xs7hrmvx19gsrzl5zs6cz0l2cpczh8y2mhd9i26c26prjk=";
+    sha256 = "0kv8f1v27l6n4xlg0dryw285i010nszv87smxxck0cwjzmiw1npx";
   };
   
   # Common iOS cross-compilation setup for Simulator
