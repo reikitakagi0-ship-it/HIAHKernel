@@ -3,7 +3,6 @@ name: Build iOS deps with auto-fix hashes
 on:
   push:
     branches: [ main ]
-  pull_request:
 
 permissions:
   contents: write
