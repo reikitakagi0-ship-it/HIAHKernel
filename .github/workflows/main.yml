@@ -67,8 +67,8 @@ jobs:
           # Try to fetch with empty hash and capture the correct one from error
           local result=$(nix-prefetch-url "$url" 2>&1 || true)
           
-          # Extract hash from output
-          local hash=$(echo "$result" | grep -oE '[a-z0-9]{52}' | head -1 || echo "")
+          # Extract hash from output (first 52-char alphanumeric string)
+          local hash=$(echo "$result" | grep -Eo '[a-z0-9]{52}' | head -1 || echo "")
           
           if [ -n "$hash" ]; then
             # Convert to SRI format
@@ -78,18 +78,19 @@ jobs:
           fi
         }
         
-        # Function to extract URL from fetchurl
+        # Function to extract URL from fetchurl (BSD grep compatible)
         extract_fetchurl_url() {
           local file=$1
-          grep -oP 'url\s*=\s*"\K[^"]+' "$file" | head -1 || echo ""
+          # Match: url = "..."
+          sed -n 's/.*url[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -1
         }
         
-        # Function to extract GitHub info from fetchFromGitHub
+        # Function to extract GitHub info from fetchFromGitHub (BSD grep compatible)
         extract_github_info() {
           local file=$1
-          local owner=$(grep -oP 'owner\s*=\s*"\K[^"]+' "$file" | head -1 || echo "")
-          local repo=$(grep -oP 'repo\s*=\s*"\K[^"]+' "$file" | head -1 || echo "")
-          local rev=$(grep -oP 'rev\s*=\s*"\K[^"]+' "$file" | head -1 || echo "")
+          local owner=$(sed -n 's/.*owner[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -1)
+          local repo=$(sed -n 's/.*repo[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -1)
+          local rev=$(sed -n 's/.*rev[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -1)
           
           if [ -n "$owner" ] && [ -n "$repo" ] && [ -n "$rev" ]; then
             echo "$owner|$repo|$rev"
@@ -126,10 +127,11 @@ jobs:
           if [ -n "$correct_hash" ]; then
             echo "  ✓ Correct hash: $correct_hash"
             
-            # Replace all hash formats
-            sed -i.bak -E "s|sha256\s*=\s*\"[^\"]*\"|sha256 = \"$correct_hash\"|g" "$file"
-            sed -i.bak -E "s|hash\s*=\s*\"[^\"]*\"|hash = \"$correct_hash\"|g" "$file"
-            sed -i.bak -E "s|sha256\s*=\s*[a-z0-9]{52}|sha256 = \"$correct_hash\"|g" "$file"
+            # Replace all hash formats (BSD sed compatible)
+            sed -i.bak "s|sha256[[:space:]]*=[[:space:]]*\"[^\"]*\"|sha256 = \"$correct_hash\"|g" "$file"
+            sed -i.bak "s|hash[[:space:]]*=[[:space:]]*\"[^\"]*\"|hash = \"$correct_hash\"|g" "$file"
+            # Also handle unquoted base32 hashes
+            sed -i.bak "s|sha256[[:space:]]*=[[:space:]]*[a-z0-9]\{52\}|sha256 = \"$correct_hash\"|g" "$file"
             
             rm -f "$file.bak"
             
@@ -173,7 +175,7 @@ jobs:
           # Try nix-prefetch-git first (more reliable for GitHub)
           if command -v nix-prefetch-git &> /dev/null; then
             local result=$(nix-prefetch-git --url "https://github.com/$owner/$repo" --rev "$rev" --quiet 2>&1 || true)
-            correct_hash=$(echo "$result" | jq -r '.sha256' 2>/dev/null || echo "")
+            correct_hash=$(echo "$result" | grep -o '"sha256"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || echo "")
           fi
           
           # Fallback to nix-prefetch-url with tarball
@@ -185,9 +187,9 @@ jobs:
           if [ -n "$correct_hash" ]; then
             echo "  ✓ Correct hash: $correct_hash"
             
-            # Replace hash
-            sed -i.bak -E "s|sha256\s*=\s*\"[^\"]*\"|sha256 = \"$correct_hash\"|g" "$file"
-            sed -i.bak -E "s|hash\s*=\s*\"[^\"]*\"|hash = \"$correct_hash\"|g" "$file"
+            # Replace hash (BSD sed compatible)
+            sed -i.bak "s|sha256[[:space:]]*=[[:space:]]*\"[^\"]*\"|sha256 = \"$correct_hash\"|g" "$file"
+            sed -i.bak "s|hash[[:space:]]*=[[:space:]]*\"[^\"]*\"|hash = \"$correct_hash\"|g" "$file"
             
             rm -f "$file.bak"
             
